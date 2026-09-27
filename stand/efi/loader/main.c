@@ -399,10 +399,9 @@ try_disk_and_partitions(pdinfo_t *disk, EFI_HANDLE skip_handle)
 }
 
 /*
- * Search the boot device first (i.e. the device we were loaded from and any
- * sibling partitions).  Per the UEFI specification, filesystems on other
- * devices must not be preferred until the boot device has been fully
- * exhausted.
+ * Search the boot device first (i.e. the ESP and any sibling partitions).
+ * Per the UEFI specification, filesystems on other devices must not be
+ * preferred until the boot device has been fully exhausted.
  */
 static int
 try_boot_device_partitions(void)
@@ -419,16 +418,6 @@ try_boot_device_partitions(void)
 		printf("Trying ESP device: %S\n", text);
 		efi_free_devpath_name(text);
 	}
-
-	/*
-	 * Usually this is the ESP, which holds no root filesystem, and the
-	 * sibling walk below is what finds the root.  But when we have been
-	 * chainloaded (gptboot.efi hands us the partition it selected with
-	 * the GPT bootme attribute), this is the partition we are meant to
-	 * boot from, so it must be tried before its siblings.
-	 */
-	if (try_as_currdev(dp, false))
-		return (0);
 
 	return (try_disk_and_partitions(dp->pd_parent, dp->pd_handle));
 }
@@ -1292,6 +1281,58 @@ is_efi_netboot(void)
 
 	devpath = efi_lookup_devpath(boot_img->DeviceHandle);
 	return (efi_devpath_get_mac(devpath, mac));
+}
+
+/*
+ * Find the net unit that booted us, so DHCP-triggered downloads (eg the
+ * initmd) go out the same NIC, not just whichever one enumerated first.
+ * Mirrors find_currdev()'s boot-device resolution, but net-only and usable
+ * before find_currdev() runs.
+ */
+int
+boot_nic_unit(int *unitp)
+{
+	struct devsw *dev;
+	EFI_DEVICE_PATH *devpath, *copy;
+	EFI_HANDLE h;
+	uint64_t extra;
+	CHAR16 *text;
+
+	if (efi_handle_lookup(boot_img->DeviceHandle, &dev, unitp, &extra) == 0 &&
+	    (dev == &efinet_dev || dev == &efihttp_dev))
+		return (0);
+
+	copy = NULL;
+	devpath = efi_lookup_image_devpath(IH);
+	while (devpath != NULL) {
+		text = efi_devpath_name(devpath);
+		printf("Candidate devpath name: %S\n", text);
+
+		h = efi_devpath_handle(devpath);
+		if (h == NULL)
+			break;
+
+		free(copy);
+		copy = NULL;
+
+		if (efi_handle_lookup(h, &dev, unitp, &extra) == 0 &&
+		    (dev == &efinet_dev || dev == &efihttp_dev)) {
+			free(copy);
+			printf("Matched dev: %S\n", text);
+			printf("Matched unit: %d\n", *unitp);
+			if (dev == &efihttp_dev) printf("Matching dev == efihttp_dev");
+			if (dev == &efinet_dev) printf("Matching dev == efinet_dev");
+			return (0);
+		}
+
+		devpath = efi_lookup_devpath(h);
+		if (devpath != NULL) {
+			copy = efi_devpath_trim(devpath);
+			devpath = copy;
+		}
+	}
+	free(copy);
+	return (ENOENT);
 }
 
 EFI_STATUS
